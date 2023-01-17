@@ -9,6 +9,7 @@ def git_push():
         subprocess.run(["git", "add", "*.py"])
         subprocess.run(["git", "commit", "-m", "updated"])
         subprocess.run(["git", "push"])
+        print("Changes Pushed to GitHub")
     else:
         print("Code not running on Mohsen's Laptop, GitHub is not updated")
 
