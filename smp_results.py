@@ -17,8 +17,8 @@ import matplotlib.pyplot as plt
 
 
 def plot_loss(history):
-    plt.plot(history['val_loss'], label='val', marker='o')
     plt.plot(history['train_loss'], label='train', marker='o')
+    plt.plot(history['val_loss'], label='val', marker='o')
     plt.title('Loss per epoch')
     plt.ylabel('loss');
     plt.xlabel('epoch')

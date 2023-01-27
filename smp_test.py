@@ -9,11 +9,13 @@ Original file is located at
 # Import Libraries
 """
 
+
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 
 from sklearn.model_selection import train_test_split
+import json
 
 import torch
 import torch.nn as nn
@@ -29,82 +31,84 @@ import albumentations as A
 
 import time
 import os
-from tqdm.notebook import tqdm
+from tqdm import tqdm
 
-# !pip install -q segmentation-models-pytorch
-# !pip install -q torchsummary
-
-from torchsummary import summary
-import segmentation_models_pytorch as smp
+import smp_models
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
+print(device)
 """# Preprocessing"""
 
-# from google.colab import drive
-# drive.mount('/content/drive')
 
-# Commented out IPython magic to ensure Python compatibility.
-# %cd /content/drive/MyDrive/Colab_Temporary
-
-IMAGE_PATH = './smp_cracks/crack_dataset/images/'
-MASK_PATH = './smp_cracks/crack_dataset/annotations/'
-
-n_classes = 2
+DATA_DIR = '../dataset/crack_seg_dataset'
 
 
-def create_df():
-    name = []
-    for dirname, _, filenames in os.walk(IMAGE_PATH):
-        for filename in filenames:
-            name.append(filename.split('.')[0])
 
-    return pd.DataFrame({'id': name}, index=np.arange(0, len(name)))
+def create_df(DIR):
+    data_frame = pd.DataFrame(columns=['image_name', 'mask_name', 'path'])
+    # for each folder under the data directory
+    for folder in os.listdir(DIR):
 
+        if folder != 'concrete_vt' and folder != 'concrete_plus' and folder != 'concrete_surface':
+            print(f"{len(os.listdir(os.path.join(DIR, folder)))} files are being loaded from {os.path.join(DIR, folder)}")
+            # for each image in the folder
 
-df = create_df()
+            for file in os.listdir(os.path.join(DIR, folder)):
+                # if the image is a mask
+                if file.endswith('.jpg'):
+                    # get the image name
+                    image_name = file
+                    # get the mask name
+                    # check if png  file exists for that image
+                    mask_name = file.replace('.jpg', '.png')
+                    # get the mask path
+                    path = os.path.join(DATA_DIR, folder)
+
+                    # check if bot jpg and png files exist
+                    if os.path.isfile(os.path.join(path, image_name)) and os.path.isfile(os.path.join(path, mask_name)):
+                        data_frame = pd.concat([data_frame, pd.DataFrame([[image_name, mask_name, path]], columns=['image_name', 'mask_name', 'path'])])
+    return data_frame
+
+df = create_df(DATA_DIR)
 print('Total Images: ', len(df))
 
+
 # split data
-X_trainval, X_test = train_test_split(df['id'].values, test_size=0.1, random_state=19)
-X_train, X_val = train_test_split(X_trainval, test_size=0.15, random_state=19)
+random_state = 42
+X_trainval, X_test = train_test_split(df, test_size=0.10, random_state=random_state, shuffle=True)
+X_train, X_val = train_test_split(X_trainval, test_size=0.10, random_state=random_state, shuffle=True)
 
 print('Train Size   : ', len(X_train))
 print('Val Size     : ', len(X_val))
 print('Test Size    : ', len(X_test))
 
-id = 100
-# img = Image.open(IMAGE_PATH + df['id'][id] + '.jpg')
-# mask = Image.open(MASK_PATH + df['id'][id] + '.png')
-# print('Image Size', np.asarray(img).shape)
-# print('Mask Size', np.asarray(mask).shape)
-# print(df['id'][id])
-#
-# plt.imshow(img)
-# plt.imshow(mask, alpha=0.6)
-# plt.title('Picture with Mask Appplied')
-# plt.show()
+id = 60
 
-img = cv2.imread(IMAGE_PATH + df['id'][id] + '.jpg')
-mask = cv2.imread(MASK_PATH + df['id'][id] + '.png')
+img = cv2.imread(os.path.join(X_train.iloc[id]['path'], X_train.iloc[id]['image_name']))
+mask = cv2.imread(os.path.join(X_train.iloc[id]['path'], X_train.iloc[id]['mask_name']), 0)
+# change mask to 0 and 1
+mask = np.where(mask > 0, 1, 0)
 
 print('Image Size', img.shape)
 print('Mask Size', mask.shape)
 
-plt.imshow(img)
-plt.imshow(mask * 255, alpha=0.6)
-plt.title('Picture with Mask Appplied')
-plt.show()
+# plt.imshow(img)
+# plt.show()
+#
+# plt.imshow(mask)
+# plt.show()
+
+# plt.imshow(img)
+# plt.imshow(mask * 255, alpha=0.6)
+# plt.show()
 
 """# Dataset"""
 
 
 class DroneDataset(Dataset):
 
-    def __init__(self, img_path, mask_path, X, mean, std, transform=None, patch=False):
-        self.img_path = img_path
-        self.mask_path = mask_path
-        self.X = X
+    def __init__(self, data_frame, mean, std, transform=None, patch=False):
+        self.X = data_frame
         self.transform = transform
         self.patches = patch
         self.mean = mean
@@ -114,13 +118,13 @@ class DroneDataset(Dataset):
         return len(self.X)
 
     def __getitem__(self, idx):
-        img = cv2.imread(self.img_path + self.X[idx] + '.jpg')
+        img = cv2.imread(os.path.join(self.X.iloc[idx]['path'], self.X.iloc[idx]['image_name']))
         img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-        mask = cv2.imread(self.mask_path + self.X[idx] + '.png', cv2.IMREAD_GRAYSCALE)
-
-        # Mohsen {
+        mask = cv2.imread(os.path.join(self.X.iloc[idx]['path'], self.X.iloc[idx]['mask_name']), 0)
+        mask = np.where(mask > 0, 1, 0)
+        # Mohsen { instead of this check, added a resize transform to the train and val transforms}
         h, w, c = img.shape
-        # print(img.shape, mask.shape)
+        # print("Before:", img.shape, mask.shape)
         output_stride = 32  # self.encoder.output_stride
         if h % output_stride != 0 or w % output_stride != 0:
             # print("OHHHHHHHHHHH")
@@ -129,7 +133,7 @@ class DroneDataset(Dataset):
 
             img = cv2.copyMakeBorder(img, 0, new_h - h, 0, new_w - w, borderType=cv2.BORDER_REFLECT)
             mask = cv2.copyMakeBorder(mask, 0, new_h - h, 0, new_w - w, borderType=cv2.BORDER_REFLECT)
-        # print(img.shape, mask.shape)
+        # print("After:", img.shape, mask.shape)
         # } Mohsen
 
         if self.transform is not None:
@@ -164,95 +168,14 @@ class DroneDataset(Dataset):
 mean = [0.485, 0.456, 0.406]
 std = [0.229, 0.224, 0.225]
 
-# resize refaul = 704, 1056
-t_train = A.Compose([A.Resize(448, 448, interpolation=cv2.INTER_NEAREST), A.HorizontalFlip(), A.VerticalFlip(),
-                     A.GridDistortion(p=0.2), A.RandomBrightnessContrast((0, 0.5), (0, 0.5)),
-                     A.GaussNoise()])
+resize_dims = (736, 1280) # must be % 32 = 0
 
-t_val = A.Compose([A.Resize(448, 448, interpolation=cv2.INTER_NEAREST), A.HorizontalFlip(),
+t_test = A.Compose([A.Resize(resize_dims[0], resize_dims[1], interpolation=cv2.INTER_NEAREST), A.HorizontalFlip(),
                    A.GridDistortion(p=0.2)])
 
-# datasets
-train_set = DroneDataset(IMAGE_PATH, MASK_PATH, X_train, mean, std, t_train, patch=False)
-val_set = DroneDataset(IMAGE_PATH, MASK_PATH, X_val, mean, std, t_val, patch=False)
+test_set = DroneDataset(X_test, mean, std, t_test, patch=False)
 
-all_data = torch.utils.data.ConcatDataset([train_set, val_set, ])
-
-print(len(train_set), '+', len(val_set), '=', len(all_data))
-
-# dataloader
-batch_size = 4
-
-train_loader = DataLoader(train_set, batch_size=batch_size, shuffle=True)
-val_loader = DataLoader(val_set, batch_size=batch_size, shuffle=False)
-
-"""# Model"""
-
-en = 'mobilenet_v2'  # encoder_name : resnet34
-ew = 'imagenet'  # encoder_weights
-ed = 5  # encoder_depth
-eos = 16  # encoder_output_stride
-
-models = {}
-# UNet
-# model = smp.Unet(encoder_name=encoder_name, encoder_weights=ew, classes=n_classes, activation=None, encoder_depth=5, decoder_channels=[256, 128, 64, 32, 16])
-model = smp.Unet(encoder_name=en, encoder_depth=ed, encoder_weights=ew, decoder_use_batchnorm=True,
-                 decoder_channels=(256, 128, 64, 32, 16), decoder_attention_type=None, in_channels=3, classes=n_classes,
-                 activation=None, aux_params=None)
-models[model.__class__.__name__] = model
-# Unet++
-model = smp.UnetPlusPlus(encoder_name=en, encoder_depth=ed, encoder_weights=ew, decoder_use_batchnorm=True,
-                         decoder_channels=(256, 128, 64, 32, 16), decoder_attention_type=None, in_channels=3,
-                         classes=n_classes, activation=None, aux_params=None)
-models[model.__class__.__name__] = model
-
-# MAnet
-model = smp.MAnet(encoder_name=en, encoder_depth=ed, encoder_weights=ew, decoder_use_batchnorm=True,
-                  decoder_channels=(256, 128, 64, 32, 16), decoder_pab_channels=64, in_channels=3, classes=n_classes,
-                  activation=None, aux_params=None)
-models[model.__class__.__name__] = model
-
-# Linknet
-model = smp.Linknet(encoder_name=en, encoder_depth=ed, encoder_weights=ew, decoder_use_batchnorm=True, in_channels=3,
-                    classes=n_classes, activation=None, aux_params=None)
-models[model.__class__.__name__] = model
-
-# FPN
-# model = smp.FPN(encoder_name=encoder_name, encoder_weights=encoder_weights,  classes=n_classes, activation=None,)
-model = smp.FPN(encoder_name=en, encoder_depth=ed, encoder_weights=ew, decoder_pyramid_channels=256,
-                decoder_segmentation_channels=128, decoder_merge_policy='add', decoder_dropout=0.2, in_channels=3,
-                classes=n_classes, activation=None, upsampling=4, aux_params=None)
-models[model.__class__.__name__] = model
-
-# # PSPNet
-# model = smp.PSPNet(encoder_name=en, encoder_weights=ew, encoder_depth=ed, psp_out_channels=512, psp_use_batchnorm=True, psp_dropout=0.2, in_channels=3, classes=n_classes, activation=None, upsampling=8, aux_params=None)
-# models[model.__class__.__name__]=model
-
-# PAN
-model = smp.PAN(encoder_name=en, encoder_weights=ew, encoder_output_stride=eos, decoder_channels=32, in_channels=3,
-                classes=n_classes, activation=None, upsampling=4, aux_params=None)
-models[model.__class__.__name__] = model
-
-# DeepLabV3
-model = smp.DeepLabV3(encoder_name=en, encoder_depth=ed, encoder_weights=ew, decoder_channels=256, in_channels=3,
-                      classes=n_classes, activation=None, upsampling=8, aux_params=None)
-models[model.__class__.__name__] = model
-
-# DeepLabV3+
-model = smp.DeepLabV3Plus(encoder_name=en, encoder_depth=ed, encoder_weights=ew, encoder_output_stride=eos,
-                          decoder_channels=256, decoder_atrous_rates=(12, 24, 36), in_channels=3, classes=n_classes,
-                          activation=None, upsampling=4, aux_params=None)
-models[model.__class__.__name__] = model
-
-"""# Training"""
-
-
-def pixel_accuracy(output, mask):
-    with torch.no_grad():
-        output = torch.argmax(F.softmax(output, dim=1), dim=1)
-        correct = torch.eq(output, mask).int()
-        accuracy = float(correct.sum()) / float(correct.numel())
-    return accuracy
+models = smp_models.return_models()
 
 
 def mIoU(pred_mask, mask, smooth=1e-10, n_classes=23):
@@ -278,271 +201,22 @@ def mIoU(pred_mask, mask, smooth=1e-10, n_classes=23):
         return np.nanmean(iou_per_class)
 
 
-def get_lr(optimizer):
-    for param_group in optimizer.param_groups:
-        return param_group['lr']
 
 
-def fit(epochs, model, train_loader, val_loader, criterion, optimizer, scheduler, patch=False):
-    torch.cuda.empty_cache()
-    train_losses = []
-    test_losses = []
-    val_iou = [];
-    val_acc = []
-    train_iou = [];
-    train_acc = []
-    lrs = []
-    min_loss = np.inf
-    decrease = 1;
-    not_improve = 0
-
-    model.to(device)
-    fit_time = time.time()
-    for e in range(epochs):
-        since = time.time()
-        running_loss = 0
-        iou_score = 0
-        accuracy = 0
-        # training loop
-        model.train()
-        for i, data in enumerate(tqdm(train_loader)):
-            # training phase
-            image_tiles, mask_tiles = data
-            if patch:
-                bs, n_tiles, c, h, w = image_tiles.size()
-
-                image_tiles = image_tiles.view(-1, c, h, w)
-                mask_tiles = mask_tiles.view(-1, h, w)
-
-            image = image_tiles.to(device);
-            mask = mask_tiles.to(device);
-            # forward
-            output = model(image)
-            loss = criterion(output, mask)
-            # evaluation metrics
-            iou_score += mIoU(output, mask)
-            accuracy += pixel_accuracy(output, mask)
-            # backward
-            loss.backward()
-            optimizer.step()  # update weight
-            optimizer.zero_grad()  # reset gradient
-
-            # step the learning rate
-            lrs.append(get_lr(optimizer))
-            scheduler.step()
-
-            running_loss += loss.item()
-
-        else:
-            model.eval()
-            test_loss = 0
-            test_accuracy = 0
-            val_iou_score = 0
-            # validation loop
-            with torch.no_grad():
-                for i, data in enumerate(tqdm(val_loader)):
-                    # reshape to 9 patches from single image, delete batch size
-                    image_tiles, mask_tiles = data
-                    # print(f"training: {data[0].shape(), data[1].shape()}")
-
-                    if patch:
-                        bs, n_tiles, c, h, w = image_tiles.size()
-
-                        image_tiles = image_tiles.view(-1, c, h, w)
-                        mask_tiles = mask_tiles.view(-1, h, w)
-
-                    image = image_tiles.to(device);
-                    mask = mask_tiles.to(device);
-                    output = model(image)
-                    # evaluation metrics
-                    val_iou_score += mIoU(output, mask)
-                    test_accuracy += pixel_accuracy(output, mask)
-                    # loss
-                    loss = criterion(output, mask)
-                    test_loss += loss.item()
-
-            # calculatio mean for each batch
-            train_losses.append(running_loss / len(train_loader))
-            test_losses.append(test_loss / len(val_loader))
-
-            if min_loss > (test_loss / len(val_loader)):
-                print('Loss Decreasing.. {:.3f} >> {:.3f} '.format(min_loss, (test_loss / len(val_loader))))
-                min_loss = (test_loss / len(val_loader))
-                decrease += 1
-                if decrease % 5 == 0:
-                    print('saving model...')
-                    torch.save(model,
-                               f'{model.__class__.__name__}-Mobilenet_v2_mIoU-{val_iou_score / len(val_loader):.3f}.pt')
-
-            if (test_loss / len(val_loader)) > min_loss:
-                not_improve += 1
-                min_loss = (test_loss / len(val_loader))
-                print(f'Loss Not Decrease for {not_improve} time')
-                if not_improve == 7:
-                    print('Loss not decrease for 7 times, Stop Training')
-                    break
-
-            # iou
-            val_iou.append(val_iou_score / len(val_loader))
-            train_iou.append(iou_score / len(train_loader))
-            train_acc.append(accuracy / len(train_loader))
-            val_acc.append(test_accuracy / len(val_loader))
-            print("Epoch:{}/{}..".format(e + 1, epochs),
-                  "Train Loss: {:.3f}..".format(running_loss / len(train_loader)),
-                  "Val Loss: {:.3f}..".format(test_loss / len(val_loader)),
-                  "Train mIoU:{:.3f}..".format(iou_score / len(train_loader)),
-                  "Val mIoU: {:.3f}..".format(val_iou_score / len(val_loader)),
-                  "Train Acc:{:.3f}..".format(accuracy / len(train_loader)),
-                  "Val Acc:{:.3f}..".format(test_accuracy / len(val_loader)),
-                  "Time: {:.2f}m".format((time.time() - since) / 60))
-
-    history = {'train_loss': train_losses, 'val_loss': test_losses,
-               'train_miou': train_iou, 'val_miou': val_iou,
-               'train_acc': train_acc, 'val_acc': val_acc,
-               'lrs': lrs}
-    print('Total time: {:.2f} m'.format((time.time() - fit_time) / 60))
-    return history
-
-
-print(models.keys())
-# model = models['FPN']
-
-histories = {}
-import json
-
-TRAIN = False
-LOAD_pt = True
-TRY_num = 3
-
-if TRAIN:
-
-    for _, model in models.items():
-        print(model.__class__.__name__)
-        if LOAD_pt:
-            model = torch.load(f'{model.__class__.__name__}_{TRY_num - 1}.pt')
-
-        max_lr = 1e-3
-        epoch = 10
-        weight_decay = 1e-4
-
-        criterion = nn.CrossEntropyLoss()
-        optimizer = torch.optim.AdamW(model.parameters(), lr=max_lr, weight_decay=weight_decay)
-        sched = torch.optim.lr_scheduler.OneCycleLR(optimizer, max_lr, epochs=epoch,
-                                                    steps_per_epoch=len(train_loader))
-
-        history = fit(epoch, model, train_loader, val_loader, criterion, optimizer, sched)
-
-        torch.save(model, f'{model.__class__.__name__}_{TRY_num}.pt')
-        with open(f'{model.__class__.__name__}_history_{TRY_num}.json', 'w') as f:
-            f.write(json.dumps(history))
-        del history
-
-        # histories[model.__class__.__name__] = history
-
-"""# Results"""
-
-
-def plot_loss(history):
-    plt.plot(history['val_loss'], label='val', marker='o')
-    plt.plot(history['train_loss'], label='train', marker='o')
-    plt.title('Loss per epoch');
-    plt.ylabel('loss');
-    plt.xlabel('epoch')
-    plt.legend(), plt.grid()
-    plt.show()
-
-
-def plot_score(history):
-    plt.plot(history['train_miou'], label='train_mIoU', marker='*')
-    plt.plot(history['val_miou'], label='val_mIoU', marker='*')
-    plt.title('Score per epoch');
-    plt.ylabel('mean IoU')
-    plt.xlabel('epoch')
-    plt.legend(), plt.grid()
-    plt.show()
-
-
-def plot_acc(history):
-    plt.plot(history['train_acc'], label='train_accuracy', marker='*')
-    plt.plot(history['val_acc'], label='val_accuracy', marker='*')
-    plt.title('Accuracy per epoch');
-    plt.ylabel('Accuracy')
-    plt.xlabel('epoch')
-    plt.legend(), plt.grid()
-    plt.show()
-
-
-TRY_num = 2
-for _, model in models.items():
-    print(model.__class__.__name__)
-
-    with open(f'./smp_cracks/train_results/{model.__class__.__name__}_history_{TRY_num}.json', 'r') as f:
-        history = json.load(f)
-
-    # plot_loss(history)
-    # plot_score(history)
-    # plot_acc(history)
 
 """# Evaluation"""
 
 
-class DroneTestDataset(Dataset):
 
-    def __init__(self, img_path, mask_path, X, transform=None):
-        self.img_path = img_path
-        self.mask_path = mask_path
-        self.X = X
-        self.transform = transform
-        # print("00")
-
-    def __len__(self):
-        return len(self.X)
-
-    def __getitem__(self, idx):
-        img = cv2.imread(self.img_path + self.X[idx] + '.jpg')
-        img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-        mask = cv2.imread(self.mask_path + self.X[idx] + '.png', cv2.IMREAD_GRAYSCALE)
-
-        # Mohsen {
-        h, w, c = img.shape
-        # print(img.shape, mask.shape)
-        output_stride = 32  # self.encoder.output_stride
-        if h % output_stride != 0 or w % output_stride != 0:
-            # print("OHHHHHHHHHHH")
-            new_h = (h // output_stride + 1) * output_stride if h % output_stride != 0 else h
-            new_w = (w // output_stride + 1) * output_stride if w % output_stride != 0 else w
-
-            img = cv2.copyMakeBorder(img, 0, new_h - h, 0, new_w - w, borderType=cv2.BORDER_REFLECT)
-            mask = cv2.copyMakeBorder(mask, 0, new_h - h, 0, new_w - w, borderType=cv2.BORDER_REFLECT)
-        # print(img.shape, mask.shape)
-        # } Mohsen
-
-        if self.transform is not None:
-            aug = self.transform(image=img, mask=mask)
-            img = Image.fromarray(aug['image'])
-            mask = aug['mask']
-
-        if self.transform is None:
-            img = Image.fromarray(img)
-
-        mask = torch.from_numpy(mask).long()
-
-        return img, mask
-
-
-t_test = None  # A.Resize(448, 448, interpolation=cv2.INTER_NEAREST)
-test_set = DroneTestDataset(IMAGE_PATH, MASK_PATH, X_test, transform=t_test)
-
-print(test_set[10])
-
-"""## Result"""
-
+from torchvision.transforms.functional import normalize
 
 def predict_image_mask_miou(model, image, mask, mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]):
-    model.eval()
-    t = T.Compose([T.ToTensor(), T.Normalize(mean, std)])
+    t = T.Compose([T.ToPILImage(), T.ToTensor()])
     image = t(image)
-    model.to(device);
+    image = normalize(image, mean, std)
+
+    # model.to(device)
+    # model.to(torch.device('cpu'))
     image = image.to(device)
     mask = mask.to(device)
     with torch.no_grad():
@@ -596,13 +270,17 @@ def pixel_acc(model, test_set):
 # plot tool
 def plot_img_mask_pred(image, mask, pred_mask, model_name, score):
     fig, (ax1, ax2, ax3) = plt.subplots(1, 3, figsize=(10, 5))
+
+    image = np.transpose(image, (1, 2, 0))
+
     ax1.imshow(image)
-    ax1.set_title('Picture');
+    ax1.set_title('Picture')
 
     ax2.imshow(mask)
     ax2.set_title('Ground truth')
     ax2.set_axis_off()
 
+    print(np.unique(pred_mask))
     ax3.imshow(pred_mask)
     ax3.set_title('{}_MobileNet | mIoU {:.3f}'.format(model_name, score))
     ax3.set_axis_off()
@@ -610,35 +288,66 @@ def plot_img_mask_pred(image, mask, pred_mask, model_name, score):
     plt.show()
 
 
-image, mask = test_set[10]
+image, mask = test_set[5]
 masks_all = None
-for _, model in models.items():
-    print("model location", f'./smp_cracks/train_results/{model.__class__.__name__}_{TRY_num}.pt')
-    # model.load_state_dict(torch.load(f'./smp_cracks/train_results/{model.__class__.__name__}_{TRY_num}.pt'))
-    model = torch.load(f'./smp_cracks/train_results/{model.__class__.__name__}_{TRY_num}.pt')
-    pred_mask, score = predict_image_mask_miou(model, image, mask)
-    # print(image.shape, mask.shape, pred_mask.shape)
-    plot_img_mask_pred(image, mask, pred_mask, model.__class__.__name__, score)
-    if masks_all is None:
-        masks_all = pred_mask
-    else: 
-        masks_all = masks_all | pred_mask
-    pred_masks_all = Image.fromarray((255 * masks_all).numpy().astype(np.uint8))
-    pred_masks_all.save("z_masks_all_output.png")
-    image.save("z_image_input.png")
+TRY_num = 0
+import segmentation_models_pytorch as smp
+device = torch.device("cpu")
 
-    gt = Image.fromarray((255 * mask).numpy().astype(np.uint8))
-    gt.save("gt_mask.png")
+n_classes = 2
+en = 'mobilenet_v2'  # encoder_name : resnet34
+ew = 'imagenet'  # encoder_weights
+ed = 5  # encoder_depth
+eos = 16  # encoder_output_stride
+device = torch.device("cpu")
 
-    segg = Image.fromarray((255 * pred_mask).numpy().astype(np.uint8))
-    segg.save(f"seg_{model.__class__.__name__}.png")
+model = smp.Unet(encoder_name=en, encoder_depth=ed, encoder_weights=ew, decoder_use_batchnorm=True,
+                 decoder_channels=(256, 128, 64, 32, 16), decoder_attention_type=None, in_channels=3,
+                 classes=n_classes,
+                 activation=None, aux_params=None)
+
+
+# Load the trained model weights to the CPU
+# Load the trained model weights to the CPU
+checkpoint = torch.load('./results/Unet/Unet-_mIoU-0.768.pt', map_location=device)
+
+# Access the state dict from the checkpoint object
+state_dict = checkpoint['state_dict'].module
+
+# Load the state dict to the model
+model.load_state_dict(state_dict)
+
+# Set the model to evaluation mode
+model.eval()
+
+
+
+
+
+
+pred_mask, score = predict_image_mask_miou(model, image, mask)
+# print(image.shape, mask.shape, pred_mask.shape)
+plot_img_mask_pred(image, mask, pred_mask, model.__class__.__name__, score)
+if masks_all is None:
+    masks_all = pred_mask
+else:
+    masks_all = masks_all | pred_mask
+pred_masks_all = Image.fromarray((255 * masks_all).numpy().astype(np.uint8))
+# pred_masks_all.save("z_masks_all_output.png")
+# image.save("z_image_input.png")
+
+gt = Image.fromarray((255 * mask).numpy().astype(np.uint8))
+# gt.save("gt_mask.png")
+
+segg = Image.fromarray((255 * pred_mask).numpy().astype(np.uint8))
+# segg.save(f"seg_{model.__class__.__name__}.png")
 
 
 
 # plot tool
 fig, (ax1) = plt.subplots(1, 1, figsize=(10, 5))
 ax1.imshow(masks_all)
-ax1.set_title('all');
+ax1.set_title('all')
 
 plt.show()
 
